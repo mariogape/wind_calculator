@@ -1,0 +1,12 @@
+# Core scientific + plotting
+numpy>=1.22
+matplotlib>=3.6
+
+# Widgets
+ipywidgets>=8
+
+# Raster IO (uses prebuilt wheels on Win/macOS/Linux)
+rasterio>=1.3,<1.4
+
+# Optional but recommended: folder picker widget
+ipyfilechooser>=0.6
