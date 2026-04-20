@@ -11,6 +11,8 @@ from pyproj import CRS
 from rasterio.io import MemoryFile
 from rasterio.mask import mask
 from rasterio.merge import merge
+from rasterio.enums import Resampling
+from rasterio.vrt import WarpedVRT
 
 from .aoi import read_aoi, transform_geometry
 from .cnig import CnigClient
@@ -18,50 +20,83 @@ from .saga import from_direction_to_saga, resolve_saga_cmd, run_wind_effect
 from .wind import SECTOR_FROM_DEGREES, WindClimatology, build_wind_climatology
 
 
-def _ensure_compatible_sources(dataset_paths: list[Path]) -> tuple[CRS, float]:
-    crs_values: set[str] = set()
-    resolutions: set[tuple[float, float]] = set()
+def _choose_target_crs(dataset_paths: list[Path]) -> tuple[CRS, float]:
+    crs_counts: dict[str, int] = {}
+    projected_resolutions: set[tuple[float, float]] = set()
+    projected_crs: dict[str, CRS] = {}
 
     for path in dataset_paths:
         with rasterio.open(path) as src:
             if src.crs is None:
                 raise ValueError(f"El raster {path.name} no tiene CRS.")
-            crs_values.add(src.crs.to_string())
-            resolutions.add((round(abs(src.res[0]), 8), round(abs(src.res[1]), 8)))
+            crs_key = src.crs.to_string()
+            crs_counts[crs_key] = crs_counts.get(crs_key, 0) + 1
+            crs_obj = CRS.from_user_input(src.crs)
+            if crs_obj.is_projected:
+                projected_crs[crs_key] = crs_obj
+                projected_resolutions.add((round(abs(src.res[0]), 8), round(abs(src.res[1]), 8)))
 
-    if len(crs_values) != 1:
+    if not projected_crs:
+        raise ValueError("El MDS descargado no esta en un CRS proyectado.")
+    if len(projected_resolutions) > 1:
         raise ValueError(
-            "Las teselas MDT02 descargadas no comparten el mismo CRS. Este caso aun no esta soportado."
-        )
-    if len(resolutions) != 1:
-        raise ValueError(
-            "Las teselas MDT02 descargadas no comparten la misma resolucion. Este caso aun no esta soportado."
+            "Las teselas MDS02 proyectadas no comparten la misma resolucion. Este caso aun no esta soportado."
         )
 
-    crs = CRS.from_user_input(crs_values.pop())
-    xres, yres = resolutions.pop()
-    if not crs.is_projected:
-        raise ValueError("El MDT descargado no esta en un CRS proyectado.")
+    crs_key = max(
+        projected_crs,
+        key=lambda key: (crs_counts.get(key, 0), -len(key)),
+    )
+    crs = projected_crs[crs_key]
+    xres, yres = projected_resolutions.pop() if projected_resolutions else (2.0, 2.0)
     if abs(xres - 2.0) > 0.1 or abs(yres - 2.0) > 0.1:
-        raise ValueError(f"Se esperaba MDT de 2 m y se ha recibido {xres} x {yres} m.")
+        raise ValueError(f"Se esperaba MDS de 2 m y se ha recibido {xres} x {yres} m.")
     return crs, xres
 
 
-def build_dem_from_tiles(
+def _open_merge_sources(
+    dataset_paths: list[Path],
+    target_crs: CRS,
+    resolution: float,
+) -> tuple[list[rasterio.DatasetReader], list[WarpedVRT], list[rasterio.io.DatasetReader]]:
+    sources: list[rasterio.io.DatasetReader] = []
+    vrts: list[WarpedVRT] = []
+    merge_sources: list[rasterio.DatasetReader] = []
+
+    for path in dataset_paths:
+        src = rasterio.open(path)
+        sources.append(src)
+        if CRS.from_user_input(src.crs) == target_crs:
+            merge_sources.append(src)
+            continue
+
+        vrt = WarpedVRT(
+            src,
+            crs=target_crs,
+            resampling=Resampling.bilinear,
+            nodata=src.nodata,
+        )
+        vrts.append(vrt)
+        merge_sources.append(vrt)
+
+    return merge_sources, vrts, sources
+
+
+def build_surface_model_from_tiles(
     *,
     tile_paths: list[Path],
     aoi_geometry_4326,
     output_path: str | Path,
 ) -> Path:
     if not tile_paths:
-        raise ValueError("No hay teselas MDT02 para construir el DEM.")
+        raise ValueError("No hay teselas MDS02 para construir el modelo de superficies.")
 
-    source_crs, _ = _ensure_compatible_sources(tile_paths)
+    source_crs, resolution = _choose_target_crs(tile_paths)
     aoi_geometry_source = transform_geometry(aoi_geometry_4326, 4326, source_crs)
 
-    datasets = [rasterio.open(path) for path in tile_paths]
+    datasets, vrts, sources = _open_merge_sources(tile_paths, source_crs, resolution)
     try:
-        mosaic, transform = merge(datasets)
+        mosaic, transform = merge(datasets, res=resolution)
         profile = datasets[0].profile.copy()
         nodata = profile.get("nodata")
         if nodata is None:
@@ -103,7 +138,9 @@ def build_dem_from_tiles(
 
         return output
     finally:
-        for dataset in datasets:
+        for dataset in vrts:
+            dataset.close()
+        for dataset in sources:
             dataset.close()
 
 
@@ -133,7 +170,18 @@ def _write_final_raster(
 
     nodata = -9999.0
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    profile.update(dtype="float32", count=1, nodata=nodata, compress="deflate", tiled=True)
+    profile.pop("blockxsize", None)
+    profile.pop("blockysize", None)
+    profile.pop("tiled", None)
+    profile.update(
+        dtype="float32",
+        count=1,
+        nodata=nodata,
+        compress="deflate",
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    )
 
     to_write = np.where(np.isfinite(data), data, nodata).astype(np.float32)
     with rasterio.open(output_path, "w", **profile) as dst:
@@ -217,19 +265,19 @@ def run_pipeline(
     cache_path = Path(cache_dir) if cache_dir else output_path / "_cache"
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    cnig_cache = cache_path / "cnig" / "mdt02"
+    cnig_cache = cache_path / "cnig" / "mds02"
     era5_cache = cache_path / "era5land"
 
     client = CnigClient()
-    tile_paths = client.search_and_download_mdt02(
+    tile_paths = client.search_and_download_mds02(
         geometry_geojson=aoi.to_feature_collection(),
         target_dir=cnig_cache,
     )
 
-    dem_path = build_dem_from_tiles(
+    surface_model_path = build_surface_model_from_tiles(
         tile_paths=tile_paths,
         aoi_geometry_4326=aoi.geometry_4326,
-        output_path=output_path / "dem_2m.tif",
+        output_path=output_path / "mds_2m.tif",
     )
 
     climatology = build_wind_climatology(
@@ -247,7 +295,7 @@ def run_pipeline(
         temp_root.mkdir(parents=True, exist_ok=True)
         exposure_path = _build_exposure_map(
             saga_cmd=saga_cmd,
-            dem_path=dem_path,
+            dem_path=surface_model_path,
             climatology=climatology,
             temp_dir=temp_root,
             output_path=output_path / "wind_exposure_2m.tif",
@@ -258,7 +306,7 @@ def run_pipeline(
         with TemporaryDirectory(prefix="wind_pipeline_", dir=output_path) as temp_dir_name:
             exposure_path = _build_exposure_map(
                 saga_cmd=saga_cmd,
-                dem_path=dem_path,
+                dem_path=surface_model_path,
                 climatology=climatology,
                 temp_dir=Path(temp_dir_name),
                 output_path=output_path / "wind_exposure_2m.tif",
@@ -268,7 +316,7 @@ def run_pipeline(
 
     summary = {
         "aoi": str(Path(aoi_path).resolve()),
-        "dem": str(dem_path.resolve()),
+        "surface_model": str(surface_model_path.resolve()),
         "wind_timeseries": str((output_path / "wind_timeseries.csv").resolve()),
         "wind_climatology": str((output_path / "wind_climatology.json").resolve()),
         "wind_exposure": str(exposure_path.resolve()),

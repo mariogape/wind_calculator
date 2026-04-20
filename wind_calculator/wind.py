@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
+import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from netCDF4 import Dataset, num2date
 
 
 SECTOR_LABELS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
@@ -43,46 +43,21 @@ class WindClimatology:
         return payload
 
 
-def _year_request(year: int, latitude: float, longitude: float) -> dict:
+def _timeseries_request(
+    start_year: int,
+    end_year: int,
+    latitude: float,
+    longitude: float,
+) -> dict:
     return {
         "variable": ["10m_u_component_of_wind", "10m_v_component_of_wind"],
-        "year": [str(year)],
-        "month": [f"{month:02d}" for month in range(1, 13)],
-        "day": [f"{day:02d}" for day in range(1, 32)],
-        "time": [f"{hour:02d}:00" for hour in range(24)],
-        "area": [latitude + 0.05, longitude - 0.05, latitude - 0.05, longitude + 0.05],
-        "data_format": "netcdf",
-        "download_format": "unarchived",
+        "location": {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+        },
+        "date": f"{start_year:04d}-01-01/{end_year:04d}-12-31",
+        "data_format": "csv",
     }
-
-
-def _legacy_year_request(year: int, latitude: float, longitude: float) -> dict:
-    request = _year_request(year, latitude, longitude).copy()
-    request.pop("data_format", None)
-    request.pop("download_format", None)
-    request["format"] = "netcdf"
-    return request
-
-
-def _find_variable(dataset: Dataset, candidates: list[str]):
-    for name in candidates:
-        if name in dataset.variables:
-            return dataset.variables[name]
-    raise KeyError(f"No se ha encontrado ninguna variable entre: {candidates}")
-
-
-def _to_numpy(variable) -> np.ndarray:
-    data = variable[:]
-    if hasattr(data, "filled"):
-        data = data.filled(np.nan)
-    return np.asarray(data, dtype=np.float64)
-
-
-def _collapse_spatial(array: np.ndarray) -> np.ndarray:
-    if array.ndim <= 1:
-        return array
-    axes = tuple(range(1, array.ndim))
-    return np.nanmean(array, axis=axes)
 
 
 def _direction_from_uv(u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -147,9 +122,10 @@ def _load_cds_credentials() -> dict[str, str] | None:
     return None
 
 
-def _download_year(
+def _download_timeseries(
     *,
-    year: int,
+    start_year: int,
+    end_year: int,
     latitude: float,
     longitude: float,
     target: Path,
@@ -164,6 +140,26 @@ def _download_year(
             "Falta la dependencia 'cdsapi'. Instala requirements.txt y configura el acceso al Climate Data Store."
         ) from exc
 
+    def is_license_error(exc: Exception) -> bool:
+        return "required licences not accepted" in str(exc).lower()
+
+    def retrieve(request: dict, file_path: Path) -> Path:
+        if file_path.exists() and file_path.stat().st_size > 0:
+            return file_path
+        try:
+            client.retrieve("reanalysis-era5-land-timeseries", request, str(file_path))
+        except Exception as exc:
+            if file_path.exists():
+                file_path.unlink()
+            if is_license_error(exc):
+                raise RuntimeError(
+                    "No se ha aceptado la licencia de ERA5-Land time-series en CDS. "
+                    "Abre https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-timeseries?tab=download#manage-licences "
+                    "y acepta la licencia antes de reintentar."
+                ) from exc
+            raise
+        return file_path
+
     target.parent.mkdir(parents=True, exist_ok=True)
     credentials = _load_cds_credentials()
     if credentials is None:
@@ -172,17 +168,23 @@ def _download_year(
             "o '%USERPROFILE%\\\\.cdsapirc' con las lineas 'url: ...' y 'key: ...'."
         )
     client = cdsapi.Client(url=credentials["url"], key=credentials["key"])
+    return retrieve(
+        _timeseries_request(start_year=start_year, end_year=end_year, latitude=latitude, longitude=longitude),
+        target,
+    )
 
-    request = _year_request(year, latitude, longitude)
-    try:
-        client.retrieve("reanalysis-era5-land", request, str(target))
-    except Exception:
-        if target.exists():
-            target.unlink()
-        legacy_request = _legacy_year_request(year, latitude, longitude)
-        client.retrieve("reanalysis-era5-land", legacy_request, str(target))
 
-    return target
+def _read_timeseries_rows(path: Path) -> list[dict[str, str]]:
+    if not zipfile.is_zipfile(path):
+        raise RuntimeError(f"Se esperaba un ZIP CSV de CDS en {path.name}, pero el fichero no es un zip valido.")
+
+    with zipfile.ZipFile(path) as archive:
+        members = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+        if not members:
+            raise RuntimeError(f"El ZIP {path.name} no contiene ningun CSV.")
+        with archive.open(members[0], "r") as handle:
+            text_handle = (line.decode("utf-8") for line in handle)
+            return list(csv.DictReader(text_handle))
 
 
 def build_wind_climatology(
@@ -203,58 +205,42 @@ def build_wind_climatology(
     timeseries_rows: list[tuple[str, float, float, float, float, str]] = []
     total_samples = 0
 
-    for year in range(start_year, end_year + 1):
-        nc_path = _download_year(
-            year=year,
-            latitude=latitude,
-            longitude=longitude,
-            target=cache_path / f"era5land_u10_v10_{year}.nc",
-        )
+    archive_path = _download_timeseries(
+        start_year=start_year,
+        end_year=end_year,
+        latitude=latitude,
+        longitude=longitude,
+        target=cache_path / f"era5land_timeseries_u10_v10_{start_year}_{end_year}.zip",
+    )
 
-        with Dataset(nc_path) as dataset:
-            u_var = _find_variable(dataset, ["u10", "10m_u_component_of_wind"])
-            v_var = _find_variable(dataset, ["v10", "10m_v_component_of_wind"])
-            time_var = dataset.variables["time"]
+    raw_rows = _read_timeseries_rows(archive_path)
+    for row in raw_rows:
+        try:
+            timestamp = datetime.fromisoformat(row["valid_time"]).replace(tzinfo=timezone.utc)
+            u_value = float(row["u10"])
+            v_value = float(row["v10"])
+        except (KeyError, TypeError, ValueError):
+            continue
 
-            u = _collapse_spatial(_to_numpy(u_var))
-            v = _collapse_spatial(_to_numpy(v_var))
-            speed = np.sqrt(u**2 + v**2)
-            direction = _direction_from_uv(u, v)
-            valid = np.isfinite(u) & np.isfinite(v) & np.isfinite(speed) & np.isfinite(direction)
-            sector_idx = _sector_index(direction)
+        speed_value = float(np.sqrt(u_value**2 + v_value**2))
+        direction_value = float(_direction_from_uv(np.asarray([u_value]), np.asarray([v_value]))[0])
+        if not np.isfinite(speed_value) or not np.isfinite(direction_value):
+            continue
 
-            counts += np.bincount(sector_idx[valid], minlength=8)
-            speed_sums += np.bincount(sector_idx[valid], weights=speed[valid], minlength=8)
-            total_samples += int(valid.sum())
-
-            datetimes = num2date(
-                time_var[:],
-                units=time_var.units,
-                calendar=getattr(time_var, "calendar", "standard"),
+        idx = int(_sector_index(np.asarray([direction_value]))[0])
+        counts[idx] += 1
+        speed_sums[idx] += speed_value
+        total_samples += 1
+        timeseries_rows.append(
+            (
+                timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                u_value,
+                v_value,
+                speed_value,
+                direction_value,
+                SECTOR_LABELS[idx],
             )
-
-            for timestamp, u_value, v_value, speed_value, direction_value, is_valid in zip(
-                datetimes, u, v, speed, direction, valid
-            ):
-                if not is_valid:
-                    continue
-                if hasattr(timestamp, "strftime"):
-                    timestamp_text = timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
-                else:
-                    timestamp_text = datetime.fromtimestamp(
-                        float(timestamp), tz=timezone.utc
-                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-                idx = int(_sector_index(np.asarray([direction_value]))[0])
-                timeseries_rows.append(
-                    (
-                        timestamp_text,
-                        float(u_value),
-                        float(v_value),
-                        float(speed_value),
-                        float(direction_value),
-                        SECTOR_LABELS[idx],
-                    )
-                )
+        )
 
     if total_samples == 0:
         raise RuntimeError("No se han podido obtener muestras validas de viento para el periodo solicitado.")
@@ -271,7 +257,7 @@ def build_wind_climatology(
     normalized_weights = raw_weights / weight_sum if weight_sum > 0 else raw_weights
 
     summary = WindClimatology(
-        provider="ERA5-Land hourly",
+        provider="ERA5-Land hourly time-series",
         longitude=float(longitude),
         latitude=float(latitude),
         start_year=int(start_year),

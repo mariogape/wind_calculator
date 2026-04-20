@@ -190,7 +190,7 @@ class CnigClient:
 
         return target
 
-    def search_and_download_mdt02(
+    def search_and_download_mds02(
         self,
         *,
         geometry_geojson: str,
@@ -198,7 +198,7 @@ class CnigClient:
     ) -> list[Path]:
         downloads = self.search_files(
             product_group="MOMDT",
-            product_code="MDT02",
+            product_code="MDS02",
             geometry_geojson=geometry_geojson,
             file_format="COG",
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+import os
 
 
 def resolve_saga_cmd(value: str | None = None) -> str:
@@ -24,12 +25,30 @@ def resolve_saga_cmd(value: str | None = None) -> str:
     )
 
 
-def _run(command: list[str]) -> None:
+def _build_saga_env(saga_cmd: str) -> dict[str, str]:
+    env = os.environ.copy()
+    saga_dir = str(Path(saga_cmd).resolve().parent)
+    extra_paths = [saga_dir]
+
+    qgis_root = Path(saga_dir).parent.parent
+    qgis_bin = qgis_root / "bin"
+    if qgis_bin.exists():
+        extra_paths.append(str(qgis_bin))
+        gdal_data = qgis_bin / "gdal-data"
+        if gdal_data.exists():
+            env.setdefault("GDAL_DATA", str(gdal_data))
+
+    env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+    return env
+
+
+def _run(command: list[str], env: dict[str, str] | None = None) -> None:
     process = subprocess.run(
         command,
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if process.returncode != 0:
         tail = "\n".join((process.stdout or "", process.stderr or "")).strip()
@@ -56,6 +75,7 @@ def run_wind_effect(
     base.parent.mkdir(parents=True, exist_ok=True)
     out_sgrd = base.with_suffix(".sgrd")
     out_tif = base.with_suffix(".tif")
+    env = _build_saga_env(saga_cmd)
 
     _run(
         [
@@ -78,7 +98,8 @@ def run_wind_effect(
             "true" if pyramids else "false",
             "-OLDVER",
             "true" if oldver else "false",
-        ]
+        ],
+        env=env,
     )
 
     _run(
@@ -90,7 +111,8 @@ def run_wind_effect(
             str(out_sgrd),
             "-FILE",
             str(out_tif),
-        ]
+        ],
+        env=env,
     )
 
     return out_tif

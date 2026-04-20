@@ -37,3 +37,5 @@ config/cdsapi.credentials
 
 #Folders
 data/
+outputs/
+outputs_test_2016/

@@ -10,7 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_start_year = default_end_year - 9
 
     parser = argparse.ArgumentParser(
-        description="Pipeline AOI -> MDT02 CNIG -> climatologia ERA5-Land -> mapa de exposicion al viento"
+        description="Pipeline AOI -> MDS02 CNIG -> climatologia ERA5-Land -> mapa de exposicion al viento"
     )
     parser.add_argument("--aoi", required=True, help="Ruta al AOI vectorial (.gpkg, .shp, .geojson, ...)")
     parser.add_argument("--output-dir", required=True, help="Directorio de salida")
