@@ -33,6 +33,7 @@ Thumbs.db
 *.log
 .env
 .env.*
+config/cdsapi.credentials
 
 #Folders
 data/

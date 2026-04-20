@@ -16,7 +16,7 @@ Includes live direction preview (rotating arrow), DEM upload, and an output dire
 
 ## Prerequisites (once)
 
-- **Python 3.9+** (3.11+ recommended)
+- **Python 3.10+** (3.12+ recommended)
 - **SAGA GIS** (provides `saga_cmd`)
   - Windows: typical path `C:\Program Files\SAGA-[version]\saga_cmd.exe`
   - macOS / Linux: `saga_cmd` available on `PATH` after installing SAGA
@@ -72,7 +72,9 @@ From `requirements.txt` (already included; adjust if needed):
 numpy>=1.22
 matplotlib>=3.6
 ipywidgets>=8
-rasterio>=1.3,<1.4
+rasterio>=1.5; python_version >= "3.12"
+pyogrio>=0.11
+geopandas>=1.0
 ipyfilechooser>=0.6
 ```
 
@@ -90,15 +92,15 @@ ipyfilechooser>=0.6
 - Paste either the full executable path **or** the folder containing it.
 
 **Rasterio / GDAL errors**  
-- Update pip/wheel inside the venv and try a pinned Rasterio:
+- Update pip/wheel inside the venv and install the stack that matches your Python:
   ```bash
   # Windows
   .venv\Scripts\python -m pip install --upgrade pip setuptools wheel
-  .venv\Scripts\python -m pip install rasterio==1.3.10
+  .venv\Scripts\python -m pip install "rasterio>=1.5" "pyogrio>=0.11" "geopandas>=1.0"
 
   # macOS / Linux
   .venv/bin/python -m pip install --upgrade pip setuptools wheel
-  .venv/bin/python -m pip install rasterio==1.3.10
+  .venv/bin/python -m pip install "rasterio>=1.5" "pyogrio>=0.11" "geopandas>=1.0"
   ```
 
 **Linux: `No module named venv`**  
@@ -128,4 +130,43 @@ sudo apt install python3-venv
 
 ## Development
 
-- Virtualenv lives in `.venv` (ignored by Git).  
+- Virtualenv lives in `.venv` (ignored by Git).
+
+## Pipeline CLI
+
+The repo now also includes an end-to-end pipeline for:
+
+- reading an AOI from file
+- downloading `MDT02` from CNIG for that AOI
+- extracting hourly `u10` and `v10` wind from `ERA5-Land`
+- deriving wind speed and direction
+- computing `Wind Effect` in **8 directions** with **SAGA GIS**
+- combining the 8 directional rasters into a final `0-100` wind exposure map
+
+Run it with:
+
+```bash
+python -m wind_calculator --aoi path/to/aoi.gpkg --output-dir outputs --saga-cmd "C:\Program Files\SAGA-GIS\saga_cmd.exe"
+```
+
+Main outputs:
+
+- `dem_2m.tif`
+- `wind_timeseries.csv`
+- `wind_climatology.json`
+- `wind_exposure_2m.tif`
+
+CDS credentials:
+
+- Copy `config/cdsapi.credentials.example` to `config/cdsapi.credentials`
+- Fill `url` and `key` in `config/cdsapi.credentials`
+- `config/cdsapi.credentials` is ignored by Git
+- If that file does not exist, the pipeline falls back to `~/.cdsapirc`
+
+Notes:
+
+- The AOI is processed **without buffer**.
+- The wind climatology uses **8 sectors**: `N, NE, E, SE, S, SW, W, NW`.
+- The wind source is **ERA5-Land hourly**.
+- You need valid **Copernicus Climate Data Store** credentials configured for `cdsapi`.
+- `SAGA GIS` must be installed and `saga_cmd` must be available via `--saga-cmd` or `PATH`.
