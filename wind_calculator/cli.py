@@ -10,7 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_start_year = default_end_year - 9
 
     parser = argparse.ArgumentParser(
-        description="Pipeline AOI -> MDT02 + edificios CNIG -> climatologia ERA5-Land -> mapa de exposicion al viento"
+        description="Pipeline AOI -> LiDAR/MDT+edificios -> climatologia ERA5-Land -> mapa de exposicion al viento"
     )
     parser.add_argument("--aoi", required=True, help="Ruta al AOI vectorial (.gpkg, .shp, .geojson, ...)")
     parser.add_argument("--output-dir", required=True, help="Directorio de salida")
@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.5,
         help="Parametro ACCEL de SAGA Wind Effect. Por defecto: 1.5",
+    )
+    parser.add_argument(
+        "--surface-source",
+        choices=["lidar_latest", "cnig_raster"],
+        default="lidar_latest",
+        help="Fuente para construir la superficie terreno+edificios. Por defecto: lidar_latest",
     )
     parser.add_argument(
         "--wind-weighting",
@@ -104,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         end_year=args.end_year,
         maxdist_km=args.maxdist_km,
         accel=args.accel,
+        surface_source=args.surface_source,
         wind_weighting=args.wind_weighting,
         strong_wind_percentile=args.strong_wind_percentile,
         strong_wind_min_mps=args.strong_wind_min_mps,

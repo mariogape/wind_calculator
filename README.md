@@ -137,8 +137,8 @@ sudo apt install python3-venv
 The repo now also includes an end-to-end pipeline for:
 
 - reading an AOI from file
-- downloading `MDT02` and `MDSE2` (building heights) from CNIG for that AOI
-- building a `terrain + buildings` surface at `2 m`
+- downloading the **latest available PNOA LiDAR** point cloud from CNIG for that AOI
+- building a `terrain + buildings` surface at `1 m` from classified LiDAR points, excluding vegetation classes
 - extracting hourly `u10` and `v10` wind from `ERA5-Land time-series`
 - deriving wind speed and direction
 - computing `Wind Effect` in **8 directions** with **SAGA GIS**
@@ -150,14 +150,20 @@ Run it with:
 python -m wind_calculator --aoi path/to/aoi.gpkg --output-dir outputs --saga-cmd "C:\Program Files\SAGA-GIS\saga_cmd.exe"
 ```
 
+Alternative surface source:
+
+```bash
+python -m wind_calculator --aoi path/to/aoi.gpkg --output-dir outputs --surface-source cnig_raster --saga-cmd "C:\Program Files\SAGA-GIS\saga_cmd.exe"
+```
+
 Main outputs:
 
-- `terrain_2m.tif`
-- `buildings_height_2m.tif`
-- `terrain_buildings_2m.tif`
+- `terrain_1m.tif`
+- `buildings_height_1m.tif`
+- `terrain_buildings_1m.tif`
 - `wind_timeseries.csv`
 - `wind_climatology.json`
-- `wind_exposure_2m.tif`
+- `wind_exposure_1m.tif`
 
 CDS credentials:
 
@@ -169,6 +175,9 @@ CDS credentials:
 Notes:
 
 - The AOI is processed **without buffer**.
+- The default surface source is `lidar_latest`, which prefers `LIDA3`, then `LIDA2`, then `LIDAR` if newer coverages are not available for the AOI.
+- LiDAR rasterization keeps **ground** and **building** classes and excludes vegetation classes from the final `terrain + buildings` surface at `1 m`.
+- If you choose `--surface-source cnig_raster`, the terrain + buildings surface falls back to the raster-based `2 m` workflow.
 - The wind climatology uses **8 sectors**: `N, NE, E, SE, S, SW, W, NW`.
 - The wind source is **ERA5-Land hourly time-series** using the nearest grid point.
 - The directional weights default to `strong_wind`: only the upper tail of hourly speeds contributes, controlled by `--strong-wind-percentile`, `--strong-wind-min-mps`, and `--strong-wind-exponent`.

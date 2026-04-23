@@ -17,6 +17,7 @@ from rasterio.warp import reproject
 
 from .aoi import read_aoi, transform_geometry
 from .cnig import CnigClient
+from .lidar import build_lidar_surface
 from .saga import from_direction_to_saga, resolve_saga_cmd, run_wind_effect
 from .wind import WindClimatology, build_wind_climatology
 
@@ -210,6 +211,7 @@ def build_terrain_buildings_surface(
     output_dir: str | Path,
 ) -> dict[str, Path]:
     output_root = Path(output_dir)
+    building_nodata = -9999.0
     terrain_path = build_clipped_mosaic_from_tiles(
         tile_paths=terrain_tile_paths,
         aoi_geometry_4326=aoi_geometry_4326,
@@ -227,7 +229,7 @@ def build_terrain_buildings_surface(
     building_aligned_path = _reproject_to_template(
         source_path=building_native_path,
         template_path=terrain_path,
-        output_path=output_root / "buildings_height_2m.tif",
+        output_path=output_root / "_buildings_height_2m_aligned_tmp.tif",
         resampling=Resampling.nearest,
         dst_nodata=0.0,
     )
@@ -246,6 +248,8 @@ def build_terrain_buildings_surface(
 
     buildings = np.where(np.isfinite(buildings), buildings, 0.0)
     buildings = np.maximum(buildings, 0.0)
+    building_heights = np.full(terrain.shape, building_nodata, dtype=np.float32)
+    building_heights[terrain_valid] = buildings[terrain_valid]
 
     surface = np.full(terrain.shape, -9999.0, dtype=np.float32)
     surface[terrain_valid] = terrain[terrain_valid] + buildings[terrain_valid]
@@ -263,14 +267,25 @@ def build_terrain_buildings_surface(
         blockysize=256,
     )
 
+    building_profile = profile.copy()
+    building_profile.update(nodata=building_nodata)
+    building_heights_path = output_root / "buildings_height_2m.tif"
+    with rasterio.open(building_heights_path, "w", **building_profile) as dst:
+        dst.write(building_heights, 1)
+
     surface_path = output_root / "terrain_buildings_2m.tif"
     with rasterio.open(surface_path, "w", **profile) as dst:
         dst.write(surface, 1)
 
+    try:
+        building_aligned_path.unlink()
+    except OSError:
+        pass
+
     return {
         "terrain": terrain_path,
         "buildings_height_native": building_native_path,
-        "buildings_height": building_aligned_path,
+        "buildings_height": building_heights_path,
         "surface_model": surface_path,
     }
 
@@ -288,6 +303,12 @@ def _normalize_raster(array: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
 
     out[valid_mask] = np.clip((values - lower) / (upper - lower), 0.0, 1.0).astype(np.float32)
     return out
+
+
+def _resolution_label(resolution: float) -> str:
+    if float(resolution).is_integer():
+        return f"{int(resolution)}m"
+    return f"{str(resolution).replace('.', 'p')}m"
 
 
 def _write_final_raster(
@@ -406,6 +427,7 @@ def run_pipeline(
     end_year: int,
     maxdist_km: float,
     accel: float,
+    surface_source: str,
     wind_weighting: str,
     strong_wind_percentile: float,
     strong_wind_min_mps: float,
@@ -424,26 +446,59 @@ def run_pipeline(
     era5_cache = cache_path / "era5land"
 
     client = CnigClient()
-    terrain_tile_paths = _search_and_download_cnig_product(
-        client=client,
-        product_code="mdt02",
-        aoi=aoi,
-        target_dir=cnig_cache / "mdt02",
-    )
-    building_tile_paths = _search_and_download_cnig_product(
-        client=client,
-        product_code="mdse2",
-        aoi=aoi,
-        target_dir=cnig_cache / "mdse2",
-    )
+    surface_metadata: dict[str, str] = {"surface_source": surface_source}
+    if surface_source == "lidar_latest":
+        try:
+            lidar_product_code, lidar_paths = client.search_and_download_latest_lidar(
+                geometry_geojson=aoi.to_feature_collection(),
+                target_dir=cnig_cache / "lidar_latest",
+            )
+        except RequestException:
+            lidar_product_code, lidar_paths = client.search_and_download_latest_lidar(
+                geometry_geojson=aoi.to_bounds_feature_collection(),
+                target_dir=cnig_cache / "lidar_latest",
+            )
 
-    surface_outputs = build_terrain_buildings_surface(
-        terrain_tile_paths=terrain_tile_paths,
-        building_tile_paths=building_tile_paths,
-        aoi_geometry_4326=aoi.geometry_4326,
-        output_dir=output_path,
-    )
+        lidar_outputs = build_lidar_surface(
+            aoi=aoi,
+            lidar_paths=lidar_paths,
+            lidar_product_code=lidar_product_code,
+            output_dir=output_path,
+        )
+        surface_outputs = {
+            "terrain": lidar_outputs.terrain_path,
+            "buildings_height": lidar_outputs.building_heights_path,
+            "surface_model": lidar_outputs.surface_model_path,
+        }
+        surface_metadata["lidar_product_code"] = lidar_product_code
+        surface_resolution_m = lidar_outputs.resolution_m
+    elif surface_source == "cnig_raster":
+        terrain_tile_paths = _search_and_download_cnig_product(
+            client=client,
+            product_code="mdt02",
+            aoi=aoi,
+            target_dir=cnig_cache / "mdt02",
+        )
+        building_tile_paths = _search_and_download_cnig_product(
+            client=client,
+            product_code="mdse2",
+            aoi=aoi,
+            target_dir=cnig_cache / "mdse2",
+        )
+
+        surface_outputs = build_terrain_buildings_surface(
+            terrain_tile_paths=terrain_tile_paths,
+            building_tile_paths=building_tile_paths,
+            aoi_geometry_4326=aoi.geometry_4326,
+            output_dir=output_path,
+        )
+        surface_resolution_m = 2.0
+    else:
+        raise ValueError("surface_source debe ser 'lidar_latest' o 'cnig_raster'.")
+
     surface_model_path = surface_outputs["surface_model"]
+    surface_metadata["surface_resolution_m"] = f"{surface_resolution_m:g}"
+    exposure_output_path = output_path / f"wind_exposure_{_resolution_label(surface_resolution_m)}.tif"
 
     climatology = build_wind_climatology(
         longitude=aoi.centroid_lon,
@@ -467,7 +522,7 @@ def run_pipeline(
             dem_path=surface_model_path,
             climatology=climatology,
             temp_dir=temp_root,
-            output_path=output_path / "wind_exposure_2m.tif",
+            output_path=exposure_output_path,
             maxdist_km=maxdist_km,
             accel=accel,
         )
@@ -478,13 +533,14 @@ def run_pipeline(
                 dem_path=surface_model_path,
                 climatology=climatology,
                 temp_dir=Path(temp_dir_name),
-                output_path=output_path / "wind_exposure_2m.tif",
+                output_path=exposure_output_path,
                 maxdist_km=maxdist_km,
                 accel=accel,
             )
 
     summary = {
         "aoi": str(Path(aoi_path).resolve()),
+        **surface_metadata,
         "terrain_model": str(surface_outputs["terrain"].resolve()),
         "building_heights": str(surface_outputs["buildings_height"].resolve()),
         "surface_model": str(surface_model_path.resolve()),

@@ -258,3 +258,36 @@ class CnigClient:
             target_dir=target_dir,
             file_format="COG",
         )
+
+    def search_and_download_latest_lidar(
+        self,
+        *,
+        geometry_geojson: str,
+        target_dir: str | Path,
+    ) -> tuple[str, list[Path]]:
+        candidates = [
+            ("MOPNOA", "LIDA3"),
+            ("MOPNOA", "LIDA2"),
+            ("MOPNOA", "LIDAR"),
+        ]
+
+        last_error: Exception | None = None
+        for product_group, product_code in candidates:
+            try:
+                paths = self.search_and_download_product(
+                    product_group=product_group,
+                    product_code=product_code,
+                    geometry_geojson=geometry_geojson,
+                    target_dir=target_dir,
+                    file_format="LAZ",
+                )
+                if paths:
+                    return product_code, paths
+            except RuntimeError as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise RuntimeError(
+                "CNIG no ha devuelto ninguna nube LiDAR para el AOI en las coberturas LIDA3, LIDA2 o LIDAR."
+            ) from last_error
+        raise RuntimeError("No se ha podido localizar LiDAR PNOA para el AOI indicado.")
