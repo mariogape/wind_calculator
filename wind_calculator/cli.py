@@ -10,7 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_start_year = default_end_year - 9
 
     parser = argparse.ArgumentParser(
-        description="Pipeline AOI -> MDS02 CNIG -> climatologia ERA5-Land -> mapa de exposicion al viento"
+        description="Pipeline AOI -> MDT02 + edificios CNIG -> climatologia ERA5-Land -> mapa de exposicion al viento"
     )
     parser.add_argument("--aoi", required=True, help="Ruta al AOI vectorial (.gpkg, .shp, .geojson, ...)")
     parser.add_argument("--output-dir", required=True, help="Directorio de salida")
@@ -49,6 +49,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parametro ACCEL de SAGA Wind Effect. Por defecto: 1.5",
     )
     parser.add_argument(
+        "--wind-weighting",
+        choices=["strong_wind", "mean_speed"],
+        default="strong_wind",
+        help="Metodo de ponderacion por direccion. Por defecto: strong_wind",
+    )
+    parser.add_argument(
+        "--strong-wind-percentile",
+        type=float,
+        default=90.0,
+        help="Percentil de velocidad usado como umbral de viento fuerte. Por defecto: 90",
+    )
+    parser.add_argument(
+        "--strong-wind-min-mps",
+        type=float,
+        default=0.0,
+        help="Umbral minimo absoluto en m/s para considerar viento fuerte. Por defecto: 0",
+    )
+    parser.add_argument(
+        "--strong-wind-exponent",
+        type=float,
+        default=3.0,
+        help="Exponente aplicado al exceso sobre el umbral de viento fuerte. Por defecto: 3",
+    )
+    parser.add_argument(
         "--keep-temp",
         action="store_true",
         help="Conserva los rasters direccionales temporales generados por SAGA",
@@ -62,6 +86,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.end_year < args.start_year:
         parser.error("--end-year debe ser mayor o igual que --start-year")
+    if args.strong_wind_exponent <= 0:
+        parser.error("--strong-wind-exponent debe ser mayor que 0")
+    if not 0 <= args.strong_wind_percentile <= 100:
+        parser.error("--strong-wind-percentile debe estar entre 0 y 100")
+    if args.strong_wind_min_mps < 0:
+        parser.error("--strong-wind-min-mps no puede ser negativo")
 
     from .pipeline import run_pipeline
 
@@ -74,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
         end_year=args.end_year,
         maxdist_km=args.maxdist_km,
         accel=args.accel,
+        wind_weighting=args.wind_weighting,
+        strong_wind_percentile=args.strong_wind_percentile,
+        strong_wind_min_mps=args.strong_wind_min_mps,
+        strong_wind_exponent=args.strong_wind_exponent,
         keep_temp=args.keep_temp,
     )
 

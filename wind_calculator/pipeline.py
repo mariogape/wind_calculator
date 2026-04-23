@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
 import rasterio
+from requests import RequestException
 from pyproj import CRS
 from rasterio.io import MemoryFile
 from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
+from rasterio.warp import reproject
 
 from .aoi import read_aoi, transform_geometry
 from .cnig import CnigClient
 from .saga import from_direction_to_saga, resolve_saga_cmd, run_wind_effect
-from .wind import SECTOR_FROM_DEGREES, WindClimatology, build_wind_climatology
+from .wind import WindClimatology, build_wind_climatology
 
 
-def _choose_target_crs(dataset_paths: list[Path]) -> tuple[CRS, float]:
+def _choose_target_crs(
+    dataset_paths: list[Path],
+    *,
+    expected_resolution: float | None = None,
+    resolution_tolerance: float = 0.1,
+) -> tuple[CRS, float]:
     crs_counts: dict[str, int] = {}
     projected_resolutions: set[tuple[float, float]] = set()
     projected_crs: dict[str, CRS] = {}
@@ -37,10 +43,10 @@ def _choose_target_crs(dataset_paths: list[Path]) -> tuple[CRS, float]:
                 projected_resolutions.add((round(abs(src.res[0]), 8), round(abs(src.res[1]), 8)))
 
     if not projected_crs:
-        raise ValueError("El MDS descargado no esta en un CRS proyectado.")
+        raise ValueError("Las teselas descargadas no estan en un CRS proyectado.")
     if len(projected_resolutions) > 1:
         raise ValueError(
-            "Las teselas MDS02 proyectadas no comparten la misma resolucion. Este caso aun no esta soportado."
+            "Las teselas proyectadas no comparten la misma resolucion. Este caso aun no esta soportado."
         )
 
     crs_key = max(
@@ -49,8 +55,13 @@ def _choose_target_crs(dataset_paths: list[Path]) -> tuple[CRS, float]:
     )
     crs = projected_crs[crs_key]
     xres, yres = projected_resolutions.pop() if projected_resolutions else (2.0, 2.0)
-    if abs(xres - 2.0) > 0.1 or abs(yres - 2.0) > 0.1:
-        raise ValueError(f"Se esperaba MDS de 2 m y se ha recibido {xres} x {yres} m.")
+    if expected_resolution is not None and (
+        abs(xres - expected_resolution) > resolution_tolerance
+        or abs(yres - expected_resolution) > resolution_tolerance
+    ):
+        raise ValueError(
+            f"Se esperaba una resolucion de {expected_resolution} m y se ha recibido {xres} x {yres} m."
+        )
     return crs, xres
 
 
@@ -58,6 +69,7 @@ def _open_merge_sources(
     dataset_paths: list[Path],
     target_crs: CRS,
     resolution: float,
+    resampling: Resampling,
 ) -> tuple[list[rasterio.DatasetReader], list[WarpedVRT], list[rasterio.io.DatasetReader]]:
     sources: list[rasterio.io.DatasetReader] = []
     vrts: list[WarpedVRT] = []
@@ -73,7 +85,7 @@ def _open_merge_sources(
         vrt = WarpedVRT(
             src,
             crs=target_crs,
-            resampling=Resampling.bilinear,
+            resampling=resampling,
             nodata=src.nodata,
         )
         vrts.append(vrt)
@@ -82,19 +94,21 @@ def _open_merge_sources(
     return merge_sources, vrts, sources
 
 
-def build_surface_model_from_tiles(
+def build_clipped_mosaic_from_tiles(
     *,
     tile_paths: list[Path],
     aoi_geometry_4326,
     output_path: str | Path,
+    expected_resolution: float | None = None,
+    warp_resampling: Resampling = Resampling.bilinear,
 ) -> Path:
     if not tile_paths:
-        raise ValueError("No hay teselas MDS02 para construir el modelo de superficies.")
+        raise ValueError("No hay teselas para construir el raster solicitado.")
 
-    source_crs, resolution = _choose_target_crs(tile_paths)
+    source_crs, resolution = _choose_target_crs(tile_paths, expected_resolution=expected_resolution)
     aoi_geometry_source = transform_geometry(aoi_geometry_4326, 4326, source_crs)
 
-    datasets, vrts, sources = _open_merge_sources(tile_paths, source_crs, resolution)
+    datasets, vrts, sources = _open_merge_sources(tile_paths, source_crs, resolution, warp_resampling)
     try:
         mosaic, transform = merge(datasets, res=resolution)
         profile = datasets[0].profile.copy()
@@ -142,6 +156,123 @@ def build_surface_model_from_tiles(
             dataset.close()
         for dataset in sources:
             dataset.close()
+
+
+def _reproject_to_template(
+    *,
+    source_path: Path,
+    template_path: Path,
+    output_path: Path,
+    resampling: Resampling,
+    dst_nodata: float,
+) -> Path:
+    with rasterio.open(template_path) as template_src:
+        template_profile = template_src.profile.copy()
+        destination = np.full((template_src.height, template_src.width), dst_nodata, dtype=np.float32)
+
+        with rasterio.open(source_path) as source_src:
+            reproject(
+                source=rasterio.band(source_src, 1),
+                destination=destination,
+                src_transform=source_src.transform,
+                src_crs=source_src.crs,
+                src_nodata=source_src.nodata,
+                dst_transform=template_src.transform,
+                dst_crs=template_src.crs,
+                dst_nodata=dst_nodata,
+                resampling=resampling,
+            )
+
+    template_profile.pop("blockxsize", None)
+    template_profile.pop("blockysize", None)
+    template_profile.pop("predictor", None)
+    template_profile.update(
+        dtype="float32",
+        count=1,
+        nodata=dst_nodata,
+        compress="deflate",
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(output_path, "w", **template_profile) as dst:
+        dst.write(destination.astype(np.float32), 1)
+    return output_path
+
+
+def build_terrain_buildings_surface(
+    *,
+    terrain_tile_paths: list[Path],
+    building_tile_paths: list[Path],
+    aoi_geometry_4326,
+    output_dir: str | Path,
+) -> dict[str, Path]:
+    output_root = Path(output_dir)
+    terrain_path = build_clipped_mosaic_from_tiles(
+        tile_paths=terrain_tile_paths,
+        aoi_geometry_4326=aoi_geometry_4326,
+        output_path=output_root / "terrain_2m.tif",
+        expected_resolution=2.0,
+        warp_resampling=Resampling.bilinear,
+    )
+    building_native_path = build_clipped_mosaic_from_tiles(
+        tile_paths=building_tile_paths,
+        aoi_geometry_4326=aoi_geometry_4326,
+        output_path=output_root / "buildings_height_2p5m.tif",
+        expected_resolution=2.5,
+        warp_resampling=Resampling.nearest,
+    )
+    building_aligned_path = _reproject_to_template(
+        source_path=building_native_path,
+        template_path=terrain_path,
+        output_path=output_root / "buildings_height_2m.tif",
+        resampling=Resampling.nearest,
+        dst_nodata=0.0,
+    )
+
+    with rasterio.open(terrain_path) as terrain_src:
+        terrain = terrain_src.read(1).astype(np.float32)
+        terrain_nodata = terrain_src.nodata
+        profile = terrain_src.profile.copy()
+
+    with rasterio.open(building_aligned_path) as building_src:
+        buildings = building_src.read(1).astype(np.float32)
+
+    terrain_valid = np.isfinite(terrain)
+    if terrain_nodata is not None:
+        terrain_valid &= terrain != terrain_nodata
+
+    buildings = np.where(np.isfinite(buildings), buildings, 0.0)
+    buildings = np.maximum(buildings, 0.0)
+
+    surface = np.full(terrain.shape, -9999.0, dtype=np.float32)
+    surface[terrain_valid] = terrain[terrain_valid] + buildings[terrain_valid]
+
+    profile.pop("blockxsize", None)
+    profile.pop("blockysize", None)
+    profile.pop("predictor", None)
+    profile.update(
+        dtype="float32",
+        count=1,
+        nodata=-9999.0,
+        compress="deflate",
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    )
+
+    surface_path = output_root / "terrain_buildings_2m.tif"
+    with rasterio.open(surface_path, "w", **profile) as dst:
+        dst.write(surface, 1)
+
+    return {
+        "terrain": terrain_path,
+        "buildings_height_native": building_native_path,
+        "buildings_height": building_aligned_path,
+        "surface_model": surface_path,
+    }
 
 
 def _normalize_raster(array: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
@@ -245,6 +376,26 @@ def _build_exposure_map(
     return _write_final_raster(template_path=template_tif, data=scaled, output_path=output_path)
 
 
+def _search_and_download_cnig_product(
+    *,
+    client: CnigClient,
+    product_code: str,
+    aoi,
+    target_dir: Path,
+) -> list[Path]:
+    download_method = getattr(client, f"search_and_download_{product_code.lower()}")
+    try:
+        return download_method(
+            geometry_geojson=aoi.to_feature_collection(),
+            target_dir=target_dir,
+        )
+    except RequestException:
+        return download_method(
+            geometry_geojson=aoi.to_bounds_feature_collection(),
+            target_dir=target_dir,
+        )
+
+
 def run_pipeline(
     *,
     aoi_path: str | Path,
@@ -255,6 +406,10 @@ def run_pipeline(
     end_year: int,
     maxdist_km: float,
     accel: float,
+    wind_weighting: str,
+    strong_wind_percentile: float,
+    strong_wind_min_mps: float,
+    strong_wind_exponent: float,
     keep_temp: bool = False,
 ) -> dict[str, str]:
     aoi = read_aoi(aoi_path)
@@ -265,20 +420,30 @@ def run_pipeline(
     cache_path = Path(cache_dir) if cache_dir else output_path / "_cache"
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    cnig_cache = cache_path / "cnig" / "mds02"
+    cnig_cache = cache_path / "cnig"
     era5_cache = cache_path / "era5land"
 
     client = CnigClient()
-    tile_paths = client.search_and_download_mds02(
-        geometry_geojson=aoi.to_feature_collection(),
-        target_dir=cnig_cache,
+    terrain_tile_paths = _search_and_download_cnig_product(
+        client=client,
+        product_code="mdt02",
+        aoi=aoi,
+        target_dir=cnig_cache / "mdt02",
+    )
+    building_tile_paths = _search_and_download_cnig_product(
+        client=client,
+        product_code="mdse2",
+        aoi=aoi,
+        target_dir=cnig_cache / "mdse2",
     )
 
-    surface_model_path = build_surface_model_from_tiles(
-        tile_paths=tile_paths,
+    surface_outputs = build_terrain_buildings_surface(
+        terrain_tile_paths=terrain_tile_paths,
+        building_tile_paths=building_tile_paths,
         aoi_geometry_4326=aoi.geometry_4326,
-        output_path=output_path / "mds_2m.tif",
+        output_dir=output_path,
     )
+    surface_model_path = surface_outputs["surface_model"]
 
     climatology = build_wind_climatology(
         longitude=aoi.centroid_lon,
@@ -288,6 +453,10 @@ def run_pipeline(
         cache_dir=era5_cache,
         timeseries_csv=output_path / "wind_timeseries.csv",
         summary_json=output_path / "wind_climatology.json",
+        weighting_method=wind_weighting,
+        strong_wind_percentile=strong_wind_percentile,
+        strong_wind_min_mps=strong_wind_min_mps,
+        strong_wind_exponent=strong_wind_exponent,
     )
 
     if keep_temp:
@@ -316,6 +485,8 @@ def run_pipeline(
 
     summary = {
         "aoi": str(Path(aoi_path).resolve()),
+        "terrain_model": str(surface_outputs["terrain"].resolve()),
+        "building_heights": str(surface_outputs["buildings_height"].resolve()),
         "surface_model": str(surface_model_path.resolve()),
         "wind_timeseries": str((output_path / "wind_timeseries.csv").resolve()),
         "wind_climatology": str((output_path / "wind_climatology.json").resolve()),

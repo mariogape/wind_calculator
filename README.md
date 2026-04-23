@@ -137,11 +137,12 @@ sudo apt install python3-venv
 The repo now also includes an end-to-end pipeline for:
 
 - reading an AOI from file
-- downloading `MDS02` from CNIG for that AOI
+- downloading `MDT02` and `MDSE2` (building heights) from CNIG for that AOI
+- building a `terrain + buildings` surface at `2 m`
 - extracting hourly `u10` and `v10` wind from `ERA5-Land time-series`
 - deriving wind speed and direction
 - computing `Wind Effect` in **8 directions** with **SAGA GIS**
-- combining the 8 directional rasters into a final `0-100` wind exposure map
+- combining the 8 directional rasters into a final `0-100` wind exposure map weighted toward strong-wind episodes
 
 Run it with:
 
@@ -151,7 +152,9 @@ python -m wind_calculator --aoi path/to/aoi.gpkg --output-dir outputs --saga-cmd
 
 Main outputs:
 
-- `mds_2m.tif`
+- `terrain_2m.tif`
+- `buildings_height_2m.tif`
+- `terrain_buildings_2m.tif`
 - `wind_timeseries.csv`
 - `wind_climatology.json`
 - `wind_exposure_2m.tif`
@@ -168,5 +171,6 @@ Notes:
 - The AOI is processed **without buffer**.
 - The wind climatology uses **8 sectors**: `N, NE, E, SE, S, SW, W, NW`.
 - The wind source is **ERA5-Land hourly time-series** using the nearest grid point.
+- The directional weights default to `strong_wind`: only the upper tail of hourly speeds contributes, controlled by `--strong-wind-percentile`, `--strong-wind-min-mps`, and `--strong-wind-exponent`.
 - You need valid **Copernicus Climate Data Store** credentials configured for `cdsapi`.
 - `SAGA GIS` must be installed and `saga_cmd` must be available via `--saga-cmd` or `PATH`.

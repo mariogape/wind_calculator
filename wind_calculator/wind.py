@@ -23,6 +23,9 @@ class WindSector:
     count: int
     frequency: float
     mean_speed_mps: float
+    max_speed_mps: float
+    strong_count: int
+    strong_frequency: float
     weight_raw: float
     weight: float
 
@@ -35,6 +38,10 @@ class WindClimatology:
     start_year: int
     end_year: int
     total_samples: int
+    weighting_method: str
+    strong_wind_percentile: float
+    strong_wind_threshold_mps: float
+    strong_wind_exponent: float
     sectors: list[WindSector]
 
     def to_dict(self) -> dict:
@@ -196,12 +203,28 @@ def build_wind_climatology(
     cache_dir: str | Path,
     timeseries_csv: str | Path | None = None,
     summary_json: str | Path | None = None,
+    weighting_method: str = "strong_wind",
+    strong_wind_percentile: float = 90.0,
+    strong_wind_min_mps: float = 0.0,
+    strong_wind_exponent: float = 3.0,
 ) -> WindClimatology:
+    if weighting_method not in {"mean_speed", "strong_wind"}:
+        raise ValueError("weighting_method debe ser 'mean_speed' o 'strong_wind'.")
+    if not (0.0 <= strong_wind_percentile <= 100.0):
+        raise ValueError("strong_wind_percentile debe estar entre 0 y 100.")
+    if strong_wind_min_mps < 0.0:
+        raise ValueError("strong_wind_min_mps no puede ser negativo.")
+    if strong_wind_exponent <= 0.0:
+        raise ValueError("strong_wind_exponent debe ser mayor que 0.")
+
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
 
     counts = np.zeros(8, dtype=np.int64)
     speed_sums = np.zeros(8, dtype=np.float64)
+    max_speeds = np.zeros(8, dtype=np.float64)
+    sample_speeds: list[float] = []
+    sample_sectors: list[int] = []
     timeseries_rows: list[tuple[str, float, float, float, float, str]] = []
     total_samples = 0
 
@@ -230,6 +253,9 @@ def build_wind_climatology(
         idx = int(_sector_index(np.asarray([direction_value]))[0])
         counts[idx] += 1
         speed_sums[idx] += speed_value
+        max_speeds[idx] = max(max_speeds[idx], speed_value)
+        sample_speeds.append(speed_value)
+        sample_sectors.append(idx)
         total_samples += 1
         timeseries_rows.append(
             (
@@ -252,7 +278,31 @@ def build_wind_climatology(
         out=np.zeros_like(speed_sums),
         where=counts > 0,
     )
-    raw_weights = frequencies * mean_speeds
+    strong_threshold = float(
+        max(
+            strong_wind_min_mps,
+            np.nanpercentile(np.asarray(sample_speeds, dtype=np.float64), strong_wind_percentile),
+        )
+    )
+
+    strong_counts = np.zeros(8, dtype=np.int64)
+    raw_weights = np.zeros(8, dtype=np.float64)
+    if weighting_method == "mean_speed":
+        raw_weights = frequencies * mean_speeds
+        strong_counts = counts.copy()
+    else:
+        for idx, speed_value in zip(sample_sectors, sample_speeds):
+            if speed_value < strong_threshold:
+                continue
+            strong_counts[idx] += 1
+            raw_weights[idx] += (speed_value - strong_threshold) ** strong_wind_exponent
+
+        if float(raw_weights.sum()) <= 0.0:
+            for idx, speed_value in zip(sample_sectors, sample_speeds):
+                raw_weights[idx] += speed_value**strong_wind_exponent
+            strong_counts = counts.copy()
+
+    strong_frequencies = strong_counts / float(total_samples)
     weight_sum = float(raw_weights.sum())
     normalized_weights = raw_weights / weight_sum if weight_sum > 0 else raw_weights
 
@@ -263,6 +313,10 @@ def build_wind_climatology(
         start_year=int(start_year),
         end_year=int(end_year),
         total_samples=int(total_samples),
+        weighting_method=weighting_method,
+        strong_wind_percentile=float(strong_wind_percentile),
+        strong_wind_threshold_mps=float(strong_threshold),
+        strong_wind_exponent=float(strong_wind_exponent),
         sectors=[
             WindSector(
                 label=label,
@@ -270,6 +324,9 @@ def build_wind_climatology(
                 count=int(counts[idx]),
                 frequency=float(frequencies[idx]),
                 mean_speed_mps=float(mean_speeds[idx]),
+                max_speed_mps=float(max_speeds[idx]),
+                strong_count=int(strong_counts[idx]),
+                strong_frequency=float(strong_frequencies[idx]),
                 weight_raw=float(raw_weights[idx]),
                 weight=float(normalized_weights[idx]),
             )

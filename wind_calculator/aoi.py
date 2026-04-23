@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pyproj import CRS, Transformer
 from pyogrio import read_dataframe, read_info
-from shapely.geometry import mapping
+from shapely.geometry import box, mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shapely_transform
 from shapely.ops import unary_union
@@ -32,6 +32,20 @@ class AOI:
                 {
                     "type": "Feature",
                     "geometry": mapping(self.geometry_4326),
+                    "properties": {},
+                }
+            ],
+        }
+        return json.dumps(feature_collection, ensure_ascii=True)
+
+    def to_bounds_feature_collection(self) -> str:
+        bounds_geometry = box(*self.bounds_4326)
+        feature_collection = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": mapping(bounds_geometry),
                     "properties": {},
                 }
             ],

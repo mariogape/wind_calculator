@@ -208,3 +208,53 @@ class CnigClient:
         for download in downloads:
             local_paths.append(self.download_file(download, output_dir / download.name))
         return local_paths
+
+    def search_and_download_product(
+        self,
+        *,
+        product_group: str,
+        product_code: str,
+        geometry_geojson: str,
+        target_dir: str | Path,
+        file_format: str = "COG",
+    ) -> list[Path]:
+        downloads = self.search_files(
+            product_group=product_group,
+            product_code=product_code,
+            geometry_geojson=geometry_geojson,
+            file_format=file_format,
+        )
+        output_dir = Path(target_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        local_paths: list[Path] = []
+        for download in downloads:
+            local_paths.append(self.download_file(download, output_dir / download.name))
+        return local_paths
+
+    def search_and_download_mdt02(
+        self,
+        *,
+        geometry_geojson: str,
+        target_dir: str | Path,
+    ) -> list[Path]:
+        return self.search_and_download_product(
+            product_group="MOMDT",
+            product_code="MDT02",
+            geometry_geojson=geometry_geojson,
+            target_dir=target_dir,
+            file_format="COG",
+        )
+
+    def search_and_download_mdse2(
+        self,
+        *,
+        geometry_geojson: str,
+        target_dir: str | Path,
+    ) -> list[Path]:
+        return self.search_and_download_product(
+            product_group="MOMDT",
+            product_code="MDSE2",
+            geometry_geojson=geometry_geojson,
+            target_dir=target_dir,
+            file_format="COG",
+        )
