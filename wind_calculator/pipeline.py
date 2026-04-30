@@ -16,6 +16,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.warp import reproject
 
 from .aoi import read_aoi, transform_geometry
+from .catastro import fetch_buildings_gml, rasterize_buildings_to_template
 from .cnig import CnigClient
 from .lidar import build_lidar_surface
 from .saga import from_direction_to_saga, resolve_saga_cmd, run_wind_effect
@@ -350,6 +351,7 @@ def _build_exposure_map(
     output_path: Path,
     maxdist_km: float,
     accel: float,
+    buildings_mask_path: Path | None = None,
 ) -> Path:
     weighted_sum: np.ndarray | None = None
     global_valid_mask: np.ndarray | None = None
@@ -394,7 +396,70 @@ def _build_exposure_map(
     final = np.full(weighted_sum.shape, np.nan, dtype=np.float32)
     final[global_valid_mask] = weighted_sum[global_valid_mask]
     scaled = _normalize_raster(final, global_valid_mask) * 100.0
+
+    if buildings_mask_path is not None:
+        with rasterio.open(buildings_mask_path) as bmask:
+            mask_arr = bmask.read(1).astype(bool)
+        if mask_arr.shape != scaled.shape:
+            raise ValueError(
+                "La mascara de edificios no coincide en forma con el raster de exposicion."
+            )
+        scaled[mask_arr] = np.nan
+
     return _write_final_raster(template_path=template_tif, data=scaled, output_path=output_path)
+
+
+def _prepare_buildings_mask(
+    *,
+    mask_source: str,
+    template_raster: Path,
+    building_heights_path: Path,
+    output_dir: Path,
+    cache_dir: Path,
+    catastro_municipality: str | None,
+    catastro_province: int | None,
+    aoi,
+) -> Path | None:
+    if mask_source == "none":
+        return None
+
+    mask_path = output_dir / "buildings_catastro_mask_1m.tif"
+
+    if mask_source == "lidar":
+        mask_path = output_dir / "buildings_lidar_mask_1m.tif"
+        with rasterio.open(building_heights_path) as src:
+            heights = src.read(1)
+            nodata = src.nodata
+            mask_arr = (heights > 0).astype(np.uint8)
+            if nodata is not None:
+                mask_arr[heights == nodata] = 0
+            profile = src.profile.copy()
+        profile.update(dtype="uint8", nodata=0, compress="deflate")
+        with rasterio.open(mask_path, "w", **profile) as dst:
+            dst.write(mask_arr, 1)
+        return mask_path
+
+    if mask_source != "catastro":
+        raise ValueError(f"mask_buildings desconocido: {mask_source}")
+
+    municipality = catastro_municipality
+    province = catastro_province
+    if municipality is None or province is None:
+        raise ValueError(
+            "Para mask_buildings='catastro' es obligatorio facilitar catastro_municipality y catastro_province."
+        )
+
+    catastro_cache = cache_dir / "catastro"
+    gml_path = fetch_buildings_gml(
+        municipality,
+        province_code=int(province),
+        cache_dir=catastro_cache,
+    )
+    return rasterize_buildings_to_template(
+        gml_path=gml_path,
+        template_raster=template_raster,
+        output_path=mask_path,
+    )
 
 
 def _search_and_download_cnig_product(
@@ -433,6 +498,9 @@ def run_pipeline(
     strong_wind_min_mps: float,
     strong_wind_exponent: float,
     keep_temp: bool = False,
+    mask_buildings: str = "catastro",
+    catastro_municipality: str | None = None,
+    catastro_province: int | None = None,
 ) -> dict[str, str]:
     aoi = read_aoi(aoi_path)
     saga_cmd = resolve_saga_cmd(saga_cmd_path)
@@ -500,6 +568,20 @@ def run_pipeline(
     surface_metadata["surface_resolution_m"] = f"{surface_resolution_m:g}"
     exposure_output_path = output_path / f"wind_exposure_{_resolution_label(surface_resolution_m)}.tif"
 
+    buildings_mask_path = _prepare_buildings_mask(
+        mask_source=mask_buildings,
+        template_raster=surface_model_path,
+        building_heights_path=surface_outputs["buildings_height"],
+        output_dir=output_path,
+        cache_dir=cache_path,
+        catastro_municipality=catastro_municipality,
+        catastro_province=catastro_province,
+        aoi=aoi,
+    )
+    if buildings_mask_path is not None:
+        surface_metadata["buildings_mask"] = str(Path(buildings_mask_path).resolve())
+        surface_metadata["buildings_mask_source"] = mask_buildings
+
     climatology = build_wind_climatology(
         longitude=aoi.centroid_lon,
         latitude=aoi.centroid_lat,
@@ -525,6 +607,7 @@ def run_pipeline(
             output_path=exposure_output_path,
             maxdist_km=maxdist_km,
             accel=accel,
+            buildings_mask_path=buildings_mask_path,
         )
     else:
         with TemporaryDirectory(prefix="wind_pipeline_", dir=output_path) as temp_dir_name:
@@ -536,6 +619,7 @@ def run_pipeline(
                 output_path=exposure_output_path,
                 maxdist_km=maxdist_km,
                 accel=accel,
+                buildings_mask_path=buildings_mask_path,
             )
 
     summary = {

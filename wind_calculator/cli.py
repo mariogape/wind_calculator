@@ -83,6 +83,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Conserva los rasters direccionales temporales generados por SAGA",
     )
+    parser.add_argument(
+        "--mask-buildings",
+        choices=["none", "catastro", "lidar"],
+        default="catastro",
+        help=(
+            "Fuente de la mascara de edificios para fijar a NoData los pixeles que caen sobre edificacion."
+            " 'catastro' descarga la capa INSPIRE Buildings; 'lidar' reusa el raster de alturas;"
+            " 'none' desactiva. Por defecto: catastro"
+        ),
+    )
+    parser.add_argument(
+        "--catastro-municipality",
+        default=None,
+        help="Nombre del municipio Catastro (p.ej. CACERES). Obligatorio si --mask-buildings=catastro.",
+    )
+    parser.add_argument(
+        "--catastro-province",
+        type=int,
+        default=None,
+        help="Codigo de provincia Catastro (p.ej. 10). Obligatorio si --mask-buildings=catastro.",
+    )
     return parser
 
 
@@ -98,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--strong-wind-percentile debe estar entre 0 y 100")
     if args.strong_wind_min_mps < 0:
         parser.error("--strong-wind-min-mps no puede ser negativo")
+    if args.mask_buildings == "catastro" and (args.catastro_municipality is None or args.catastro_province is None):
+        parser.error(
+            "--mask-buildings=catastro requiere --catastro-municipality y --catastro-province"
+        )
 
     from .pipeline import run_pipeline
 
@@ -116,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
         strong_wind_min_mps=args.strong_wind_min_mps,
         strong_wind_exponent=args.strong_wind_exponent,
         keep_temp=args.keep_temp,
+        mask_buildings=args.mask_buildings,
+        catastro_municipality=args.catastro_municipality,
+        catastro_province=args.catastro_province,
     )
 
     for key, value in outputs.items():
