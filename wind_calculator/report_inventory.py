@@ -443,7 +443,7 @@ La cobertura efectiva sobre el inventario activo es del {(cov.validos/max(cov.ac
 {species_html}
 
 <div class="hb">
-  <strong>Especies «centinela».</strong> Aquellas cuya proporción de ejemplares en exposición ≥ 60 es claramente superior a la media municipal: {sentinel_text or "no se detecta una concentración inusual en ninguna especie."}. Estas especies merecen una atención específica: no necesariamente son más frágiles biomecánicamente, pero su distribución espacial las está sobre-exponiendo al régimen de viento de {municipality_label}.
+  <strong>Especies «centinela».</strong> Aquellas cuya proporción de ejemplares en exposición ≥ 60 es claramente superior a la media municipal: {sentinel_text or "no se detecta una concentración inusual en ninguna especie."}. Estas especies merecen una atención específica: no necesariamente son más frágiles biomecánicamente, pero su distribución espacial las está sobreexponiendo al régimen de viento de {municipality_label}.
 </div>
 
 <section class="sh"><div class="sn">§ 5</div><h2>Alineación vs Parques</h2></section>
@@ -461,7 +461,7 @@ La cobertura efectiva sobre el inventario activo es del {(cov.validos/max(cov.ac
 
 <section class="sh"><div class="sn">§ 6</div><h2>Tamaño y exposición</h2></section>
 
-<p>¿Los ejemplares más grandes y maduros están sobre-representados en zonas expuestas? Esta es una de las preguntas clave para la priorización de inspecciones: un árbol grande en una zona expuesta es exactamente el perfil de mayor riesgo de daño mecánico.</p>
+<p>¿Los ejemplares más grandes y maduros están sobrerrepresentados en zonas expuestas? Esta es una de las preguntas clave para la priorización de inspecciones: un árbol grande en una zona expuesta es exactamente el perfil de mayor riesgo de daño mecánico.</p>
 
 <figure class="fig"><img src="{f6_uri}" alt="Boxplot por altura" /><figcaption>Figura 6 — Distribución del índice de exposición por clase de altura.</figcaption></figure>
 
@@ -505,7 +505,7 @@ La cobertura efectiva sobre el inventario activo es del {(cov.validos/max(cov.ac
 <ul>
   <li><strong>El arbolado urbano de {municipality_label} está mayoritariamente abrigado.</strong> Tres de cada cuatro árboles del inventario tienen un índice de exposición por debajo de 40, gracias a que el casco urbano se desarrolla en una posición topográficamente protegida del régimen SW–W dominante.</li>
   <li><strong>El riesgo no se reparte de forma homogénea: se concentra en pocos sectores periurbanos.</strong> Macondo, Paseo Alto, Cabezarrubia/P. Padre Pacífico y Río Tinto agrupan la inmensa mayoría de los árboles en exposición ≥ 60. Cualquier protocolo de inspección preventiva debería empezar por allí.</li>
-  <li><strong>Los ejemplares grandes están sobre-representados en zonas expuestas.</strong> El {(height_x_expo.loc['Ejemplar (Más de 15 m.)', ['Alto', 'Muy alto']].sum()/max(height_x_expo.loc['Ejemplar (Más de 15 m.)'].sum(),1)*100):.0f} % de los ejemplares > 15 m están en exposición ≥ 60, frente al {pct_alto_total:.0f} % medio. Esto eleva el coste potencial de un fallo mecánico (ramas y pies grandes son más peligrosos al caer) y justifica una inspección más exigente para esa cohorte.</li>
+  <li><strong>Los ejemplares grandes están sobrerrepresentados en zonas expuestas.</strong> El {(height_x_expo.loc['Ejemplar (Más de 15 m.)', ['Alto', 'Muy alto']].sum()/max(height_x_expo.loc['Ejemplar (Más de 15 m.)'].sum(),1)*100):.0f} % de los ejemplares > 15 m están en exposición ≥ 60, frente al {pct_alto_total:.0f} % medio. Esto eleva el coste potencial de un fallo mecánico (ramas y pies grandes son más peligrosos al caer) y justifica una inspección más exigente para esa cohorte.</li>
   <li><strong>El arbolado de parque está más expuesto que el de alineación, contrariando la intuición.</strong> Los parques periurbanos en cota alta empujan la media del «parque» por encima de la del «viario». Esta lectura debe incorporarse al protocolo: la regla «la calle está más expuesta» no aplica en {municipality_label}.</li>
   <li><strong>{_fmt_int(n_priority)} árboles prioritarios concretos</strong> ya están identificados y geolocalizados (§ 8). Es el listado de partida más eficiente para una primera ronda de inspección reforzada.</li>
   <li><strong>Para zonas con concentración extrema de exposición</strong> (Macondo, Paseo Alto) sería conveniente complementar este índice con un <strong>modelado CFD</strong> de mayor detalle, capaz de cuantificar la velocidad real del viento a escala de calle y de copa.</li>

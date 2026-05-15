@@ -28,8 +28,18 @@ from .figures import (
 )
 
 
-_STYLE_BLOCK = """<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+_FONTS_CSS_PATH = Path(__file__).resolve().parent / "fonts_embedded.css"
+try:
+    _EMBEDDED_FONTS_CSS = _FONTS_CSS_PATH.read_text(encoding="utf-8")
+except OSError:
+    _EMBEDDED_FONTS_CSS = (
+        "@import url('https://fonts.googleapis.com/css2?"
+        "family=Inter:wght@300;400;500;600;700"
+        "&family=Space+Grotesk:wght@400;500;600;700&display=swap');"
+    )
+
+
+_STYLE_BLOCK = "<style>\n" + _EMBEDDED_FONTS_CSS + """
 :root{--dark:#1b373f;--forest:#426331;--olive:#879753;--lime:#bcbe76;--cream:#fcf5e3;--g100:#f7f7f5;--g200:#e8e8e4;--g300:#d0d0c8;--g500:#8a8a80;--g700:#4a4a44;--txt:#2c2c28}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter','TT Norms',sans-serif;color:var(--txt);background:#fff;line-height:1.7;font-size:15px;-webkit-font-smoothing:antialiased}
@@ -105,7 +115,28 @@ li::marker{color:var(--olive)}
 .footer{margin-top:60px;padding:30px 0;border-top:2px solid var(--g200);text-align:center;color:var(--g500);font-size:12px}
 .footer img{width:120px;opacity:.5;margin-bottom:10px}
 
-@media print{.cover{page-break-after:always}.sh{page-break-before:always;margin-left:0;margin-right:0}body{font-size:13px}.page{padding:0 20px}}
+@media print{
+  @page{size:A4;margin:18mm 17mm 20mm 17mm}
+  @page cover{margin:0}
+  body{font-size:12.5px;line-height:1.55;background:#fff}
+  .cover{page:cover;page-break-after:always;break-after:page}
+  .page{page:content;max-width:none;margin:0;padding:0}
+  .sh{page-break-before:always;break-before:page;margin:0 0 22px;padding:22px 28px}
+  /* keep blocks together on the same page */
+  .hb,.phase,.formula,figure,.fig,.figpair,table,.sg,.kpi,.qa,.mc{page-break-inside:avoid;break-inside:avoid}
+  figure img{page-break-inside:avoid;break-inside:avoid}
+  figcaption{break-before:avoid;page-break-before:avoid}
+  /* never orphan headings */
+  h1,h2,h3,h4{page-break-after:avoid;break-after:avoid}
+  /* keep first paragraph after a heading with the heading */
+  h2+p,h3+p,h4+p,h2+ul,h3+ul,h4+ul,h2+table,h3+table{page-break-before:avoid;break-before:avoid}
+  /* avoid widows/orphans on plain text */
+  p{orphans:3;widows:3}
+  table{page-break-inside:auto}
+  thead{display:table-header-group}
+  tr{page-break-inside:avoid;break-inside:avoid}
+  .footer{margin-top:30px;page-break-inside:avoid;break-inside:avoid}
+}
 </style>"""
 
 
